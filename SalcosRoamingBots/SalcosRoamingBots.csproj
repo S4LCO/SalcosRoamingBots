@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>SalcosRoamingBots</AssemblyName>
+    <RootNamespace>SalcosRoamingBots</RootNamespace>
+    <AssemblyVersion>0.3.2.0</AssemblyVersion>
+    <FileVersion>0.3.2.0</FileVersion>
+    <Version>0.3.2</Version>
+    <Authors>Salco</Authors>
+    <Description>Resource-conscious, map-wide bot roaming for SPT 4.1.x.</Description>
+    <Configurations>Debug;Release</Configurations>
+    <SPTInstallPath Condition="'$(SPTInstallPath)' == ''">S:\SPT_4.1.x</SPTInstallPath>
+    <DeployToSPT Condition="'$(DeployToSPT)' == ''">false</DeployToSPT>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(SPTInstallPath)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Comfort">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\Comfort.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DrakiaXYZ-BigBrain">
+      <HintPath>$(SPTInstallPath)\BepInEx\plugins\DrakiaXYZ-BigBrain.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\Sirenix.Serialization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="ValidateSPTReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll')"
+           Text="SPT assemblies not found. Set SPTInstallPath to your SPT 4.1.x installation." />
+    <Error Condition="!Exists('$(SPTInstallPath)\BepInEx\plugins\DrakiaXYZ-BigBrain.dll')"
+           Text="BigBrain was not found below SPTInstallPath." />
+    <Error Condition="!Exists('$(SPTInstallPath)\BepInEx\plugins\DrakiaXYZ-Waypoints\DrakiaXYZ-Waypoints.dll')"
+           Text="Waypoints was not found below SPTInstallPath." />
+  </Target>
+
+  <Target Name="DeployPlugin" AfterTargets="Build" Condition="'$(DeployToSPT)' == 'true'">
+    <MakeDir Directories="$(SPTInstallPath)\BepInEx\plugins\SalcosRoamingBots" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(SPTInstallPath)\BepInEx\plugins\SalcosRoamingBots" />
+  </Target>
+</Project>
