@@ -5,6 +5,7 @@ using SalcosRoamingBots.Configuration;
 using SalcosRoamingBots.Diagnostics;
 using SalcosRoamingBots.Models;
 using SalcosRoamingBots.Navigation;
+using SalcosRoamingBots.Utilities;
 using UnityEngine;
 
 namespace SalcosRoamingBots.Brains
@@ -62,6 +63,16 @@ namespace SalcosRoamingBots.Brains
 
             _state = roamingData.State;
             _state.LayerActive = true;
+
+            RoamingInterruptionReason safetyBlock = BotEligibility.GetImmediateSafetyBlock(BotOwner, SrbSettings.PostCombatCooldown.Value);
+            if (safetyBlock != RoamingInterruptionReason.None)
+            {
+                _state.PendingInterruptionReason = safetyBlock;
+                _state.EmergencyYieldUntil = Time.time + Mathf.Max(0.5f, SrbSettings.LayerDecisionInterval.Value);
+                BotOwner.Mover?.Sprint(false);
+                BotOwner.Mover?.Stop();
+                return;
+            }
 
             if (Time.time < _nextMovementUpdate)
             {
@@ -176,6 +187,7 @@ namespace SalcosRoamingBots.Brains
             _state.NextProgressCheckTime = Time.time + SrbSettings.ProgressCheckInterval.Value;
             float movement = Vector3.Distance(_state.LastMovementSamplePosition, BotOwner.Position);
             RaidStatistics.RecordMovement(movement);
+            RoamingCoordinator.RecordBotPosition(_state, BotOwner.Position);
             _state.LastMovementSamplePosition = BotOwner.Position;
             float progress = Vector3.Distance(_state.LastProgressPosition, BotOwner.Position);
             if (progress >= SrbSettings.StuckDistance.Value)

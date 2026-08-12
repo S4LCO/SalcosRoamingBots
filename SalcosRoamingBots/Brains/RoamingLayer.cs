@@ -24,6 +24,7 @@ namespace SalcosRoamingBots.Brains
         {
             _state = new RoamingState(botOwner);
             _actionData = new RoamingActionData(_state);
+            RoamingCoordinator.RegisterState(_state);
         }
 
         public override string GetName()
@@ -33,6 +34,19 @@ namespace SalcosRoamingBots.Brains
 
         public override bool IsActive()
         {
+            if (Time.time < _state.EmergencyYieldUntil)
+            {
+                _previousActive = false;
+                return false;
+            }
+
+            if (!_state.HasTarget && !_state.SearchQueued && Time.time < _state.NextSearchAllowedTime)
+            {
+                _state.PendingInterruptionReason = RoamingInterruptionReason.NavigationBackoff;
+                _previousActive = false;
+                return false;
+            }
+
             if (Time.time < _nextEligibilityCheck)
             {
                 return _previousActive;
@@ -42,13 +56,39 @@ namespace SalcosRoamingBots.Brains
 
             try
             {
-                _previousActive = Time.time >= _state.DisabledUntil
-                    && CompatibilityManager.IsRoamingGloballyAllowed()
-                    && BotEligibility.CanRoam(BotOwner);
+                if (Time.time < _state.DisabledUntil)
+                {
+                    _previousActive = false;
+                    _state.PendingInterruptionReason = RoamingInterruptionReason.BotUnavailable;
+                }
+                else if (!SrbSettings.Enabled.Value)
+                {
+                    _previousActive = false;
+                    _state.PendingInterruptionReason = RoamingInterruptionReason.Disabled;
+                }
+                else if (!CompatibilityManager.IsRoamingGloballyAllowed())
+                {
+                    _previousActive = false;
+                    _state.PendingInterruptionReason = RoamingInterruptionReason.Compatibility;
+                }
+                else
+                {
+                    BotEligibilityResult result = BotEligibility.Evaluate(BotOwner);
+                    _previousActive = result.CanRoam;
+                    if (result.CanRoam)
+                    {
+                        _state.PendingInterruptionReason = RoamingInterruptionReason.None;
+                    }
+                    else
+                    {
+                        _state.PendingInterruptionReason = result.Reason;
+                    }
+                }
             }
             catch (Exception exception)
             {
                 _previousActive = false;
+                _state.PendingInterruptionReason = RoamingInterruptionReason.BotUnavailable;
                 _state.DisabledUntil = Time.time + 30f;
                 if (Time.time >= _nextErrorLogTime)
                 {
@@ -79,7 +119,17 @@ namespace SalcosRoamingBots.Brains
         public override void Stop()
         {
             _state.LayerActive = false;
-            RoamingCoordinator.InterruptTarget(_state);
+            RoamingInterruptionReason reason = _state.PendingInterruptionReason;
+            if (reason == RoamingInterruptionReason.None || reason == RoamingInterruptionReason.HigherPriorityLayer)
+            {
+                RoamingInterruptionReason safetyBlock = BotEligibility.GetImmediateSafetyBlock(BotOwner, SrbSettings.PostCombatCooldown.Value);
+                if (safetyBlock != RoamingInterruptionReason.None)
+                {
+                    reason = safetyBlock;
+                }
+            }
+
+            RoamingCoordinator.InterruptTarget(_state, reason);
         }
 
         public override void BuildDebugText(StringBuilder stringBuilder)

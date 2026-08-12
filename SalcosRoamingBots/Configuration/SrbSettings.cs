@@ -32,6 +32,10 @@ namespace SalcosRoamingBots.Configuration
         internal static ConfigEntry<bool> AllowSprinting;
         internal static ConfigEntry<float> SprintAboveDistance;
         internal static ConfigEntry<float> PostCombatCooldown;
+        internal static ConfigEntry<bool> CoverageAwareRoaming;
+        internal static ConfigEntry<bool> AdaptiveDistanceScaling;
+        internal static ConfigEntry<float> FailedAreaCooldown;
+        internal static ConfigEntry<bool> ResumeAfterCombat;
 
         internal static ConfigEntry<int> PathCalculationsPerFrame;
         internal static ConfigEntry<float> LayerDecisionInterval;
@@ -46,6 +50,10 @@ namespace SalcosRoamingBots.Configuration
         internal static ConfigEntry<float> DebugFreeCameraLookSpeed;
         internal static ConfigEntry<float> DebugFreeCameraMoveSpeed;
         internal static ConfigEntry<float> DebugFreeCameraBoostSpeed;
+        internal static ConfigEntry<bool> DebugBotOverlay;
+        internal static ConfigEntry<bool> DebugRouteLines;
+        internal static ConfigEntry<KeyboardShortcut> DebugSelectNextBot;
+        internal static ConfigEntry<KeyboardShortcut> DebugFollowSelectedBot;
 
         internal static void Bind(ConfigFile config)
         {
@@ -96,6 +104,14 @@ namespace SalcosRoamingBots.Configuration
                 new ConfigDescription("Bots may sprint while farther than this from their destination.", new AcceptableValueRange<float>(10f, 300f)));
             PostCombatCooldown = config.Bind("3. Roaming", "Post-combat cooldown", 12f,
                 new ConfigDescription("Time after combat or danger before SRB may resume control.", new AcceptableValueRange<float>(0f, 90f)));
+            CoverageAwareRoaming = config.Bind("3. Roaming", "Coverage-aware destinations", true,
+                "Prefer map sectors that have been visited less often during the current raid.");
+            AdaptiveDistanceScaling = config.Bind("3. Roaming", "Adaptive distance scaling", true,
+                "Individually reduce a bot's destination range when its current area produces too few complete routes. Other bots are not affected.");
+            FailedAreaCooldown = config.Bind("3. Roaming", "Failed area cooldown", 180f,
+                new ConfigDescription("Temporarily avoid a map sector after a bot became stuck there. Set to zero to disable.", new AcceptableValueRange<float>(0f, 900f)));
+            ResumeAfterCombat = config.Bind("3. Roaming", "Resume destination after combat", true,
+                "Try to continue toward the previous destination after combat if a fresh complete route can still be found.");
 
             PathCalculationsPerFrame = config.Bind("4. Performance", "Path calculations per frame", 2,
                 new ConfigDescription("Global NavMesh calculation budget shared by every SRB bot.", new AcceptableValueRange<int>(1, 8)));
@@ -110,7 +126,7 @@ namespace SalcosRoamingBots.Configuration
             StuckTimeout = config.Bind("4. Performance", "Stuck timeout", 18f,
                 new ConfigDescription("Seconds without sufficient movement before a new destination is requested.", new AcceptableValueRange<float>(5f, 90f)));
             SearchRetryDelay = config.Bind("4. Performance", "Search retry delay", 2f,
-                new ConfigDescription("Base delay after no complete route could be found.", new AcceptableValueRange<float>(0.5f, 20f)));
+                new ConfigDescription("Base delay after no complete route could be found. Repeated failures increase the delay up to 90 seconds for that bot.", new AcceptableValueRange<float>(0.5f, 20f)));
 
             EnableDebugFreeCamera = config.Bind("5. Debug tools", "Enable debug free camera", false,
                 "Allow the SRB observation camera to be toggled during a raid. The player body remains at its real position and can still be injured or killed.");
@@ -122,6 +138,14 @@ namespace SalcosRoamingBots.Configuration
                 new ConfigDescription("Normal observation camera movement speed.", new AcceptableValueRange<float>(1f, 100f)));
             DebugFreeCameraBoostSpeed = config.Bind("5. Debug tools", "Debug free camera boost speed", 60f,
                 new ConfigDescription("Observation camera movement speed while holding Left Shift.", new AcceptableValueRange<float>(5f, 300f)));
+            DebugBotOverlay = config.Bind("5. Debug tools", "Show bot overlay", true,
+                "Show supported bot names, roles, SRB state, and distance while the debug free camera is active.");
+            DebugRouteLines = config.Bind("5. Debug tools", "Show roaming routes", true,
+                "Draw the selected bot's current SRB route while the debug free camera is active.");
+            DebugSelectNextBot = config.Bind("5. Debug tools", "Select next bot", new KeyboardShortcut(UnityEngine.KeyCode.PageDown),
+                "Select the next living SRB-supported bot in the observation overlay.");
+            DebugFollowSelectedBot = config.Bind("5. Debug tools", "Follow selected bot", new KeyboardShortcut(UnityEngine.KeyCode.PageUp),
+                "Toggle a chase camera for the selected bot. Select a bot first or the first available bot will be selected automatically.");
         }
     }
 }

@@ -15,24 +15,105 @@ namespace SalcosRoamingBots.Navigation
         private static readonly Queue<TargetSearchJob> SearchJobs = new Queue<TargetSearchJob>();
         private static readonly Dictionary<int, TargetReservation> Reservations = new Dictionary<int, TargetReservation>();
         private static readonly List<int> StaleReservationIds = new List<int>();
+        private static readonly List<WeakReference<RoamingState>> KnownStates = new List<WeakReference<RoamingState>>();
 
         private static ManualLogSource _logger;
         private static int _nextReservationId = 1;
         private static float _nextCleanupTime;
-
         internal static void Initialize(ManualLogSource logger)
         {
             _logger = logger;
             SearchJobs.Clear();
             Reservations.Clear();
+            KnownStates.Clear();
+            RoamingCoverage.Reset();
             _nextReservationId = 1;
             _nextCleanupTime = Time.time + 10f;
         }
 
-        internal static void Shutdown()
+        internal static void BeginRaid()
         {
             SearchJobs.Clear();
             Reservations.Clear();
+            RoamingCoverage.Reset();
+            _nextReservationId = 1;
+            _nextCleanupTime = Time.time + 10f;
+
+            for (int i = KnownStates.Count - 1; i >= 0; i--)
+            {
+                if (!KnownStates[i].TryGetTarget(out RoamingState state) || state == null)
+                {
+                    KnownStates.RemoveAt(i);
+                    continue;
+                }
+
+                state.Bot?.Mover?.Sprint(false);
+                state.Bot?.Mover?.Stop();
+                state.SearchQueued = false;
+                state.SearchGeneration++;
+                state.ClearTarget(false);
+                state.ClearSuspendedTarget();
+                state.ReservationId = 0;
+                state.ConsecutiveSearchFailures = 0;
+                state.AdaptiveDistanceScale = 1f;
+                state.NextSearchAllowedTime = 0f;
+                state.HasVisitedSector = false;
+            }
+        }
+
+        internal static void EndRaid()
+        {
+            SearchJobs.Clear();
+            Reservations.Clear();
+            KnownStates.Clear();
+            RoamingCoverage.Reset();
+        }
+
+        internal static void Shutdown()
+        {
+            EndRaid();
+            _logger = null;
+        }
+
+        internal static void RegisterState(RoamingState state)
+        {
+            if (state != null)
+            {
+                KnownStates.Add(new WeakReference<RoamingState>(state));
+            }
+        }
+
+        internal static void GetLiveStates(List<RoamingState> destination)
+        {
+            destination.Clear();
+            for (int i = KnownStates.Count - 1; i >= 0; i--)
+            {
+                if (!KnownStates[i].TryGetTarget(out RoamingState state) || state == null || !IsBotAlive(state.Bot))
+                {
+                    KnownStates.RemoveAt(i);
+                    continue;
+                }
+
+                destination.Add(state);
+            }
+        }
+
+        internal static float GetAverageAdaptiveDistanceScale()
+        {
+            float total = 0f;
+            int count = 0;
+            for (int i = KnownStates.Count - 1; i >= 0; i--)
+            {
+                if (!KnownStates[i].TryGetTarget(out RoamingState state) || state == null || !IsBotAlive(state.Bot))
+                {
+                    continue;
+                }
+
+                total += state.AdaptiveDistanceScale;
+                count++;
+            }
+
+            return count > 0 ? total / count : 1f;
         }
 
         internal static void Update()
@@ -76,9 +157,28 @@ namespace SalcosRoamingBots.Navigation
 
             state.SearchQueued = true;
             int generation = ++state.SearchGeneration;
-            int attempts = SrbSettings.CandidatesPerSearch.Value;
-            SearchJobs.Enqueue(new TargetSearchJob(state, generation, attempts));
-            RaidStatistics.RecordSearchRequested(SearchJobs.Count);
+            bool resume = SrbSettings.ResumeAfterCombat.Value
+                && state.CanResumeTarget()
+                && !RoamingCoverage.IsTemporarilyBlocked(state.SuspendedDestination);
+
+            TargetSearchJob job;
+            if (resume)
+            {
+                job = new TargetSearchJob(state, generation, 1, true, state.SuspendedDestination);
+                RaidStatistics.RecordResumeRequested();
+            }
+            else
+            {
+                if (state.HasSuspendedTarget)
+                {
+                    state.ClearSuspendedTarget();
+                }
+
+                job = new TargetSearchJob(state, generation, SrbSettings.CandidatesPerSearch.Value, false, Vector3.zero);
+            }
+
+            SearchJobs.Enqueue(job);
+            RaidStatistics.RecordSearchRequested(state, SearchJobs.Count);
         }
 
         internal static void CancelPendingSearch(RoamingState state)
@@ -95,25 +195,49 @@ namespace SalcosRoamingBots.Navigation
         internal static void CompleteTarget(RoamingState state)
         {
             RaidStatistics.RecordTargetReached(state.AssignedPathLength);
+            RoamingCoverage.RecordTargetReached(state.Destination);
             ReleaseReservation(state);
             state.ClearTarget(true);
             state.ConsecutiveSearchFailures = 0;
         }
 
-        internal static void InterruptTarget(RoamingState state)
+        internal static void InterruptTarget(RoamingState state, RoamingInterruptionReason reason)
         {
             if (state == null)
             {
                 return;
             }
 
+            if (reason == RoamingInterruptionReason.None)
+            {
+                reason = RoamingInterruptionReason.HigherPriorityLayer;
+            }
+
             bool hadTarget = state.HasTarget;
             bool hadPendingSearch = state.SearchQueued;
-            RaidStatistics.RecordInterruption(hadTarget, hadPendingSearch);
+            bool shouldSuspend = hadTarget
+                && SrbSettings.ResumeAfterCombat.Value
+                && (reason == RoamingInterruptionReason.Combat || reason == RoamingInterruptionReason.Danger);
+
+            if (shouldSuspend)
+            {
+                state.SuspendCurrentTarget(Mathf.Max(60f, SrbSettings.PostCombatCooldown.Value + 120f));
+            }
+            else if (reason == RoamingInterruptionReason.Disabled
+                || reason == RoamingInterruptionReason.Compatibility
+                || reason == RoamingInterruptionReason.BotUnavailable)
+            {
+                state.ClearSuspendedTarget();
+            }
+
+            state.LastInterruptionReason = reason;
+            state.LastInterruptionTime = Time.time;
+            state.PendingInterruptionReason = RoamingInterruptionReason.None;
+            RaidStatistics.RecordInterruption(reason, hadTarget, hadPendingSearch);
             CancelPendingSearch(state);
             ReleaseReservation(state);
             state.ClearTarget(false);
-            state.NextSearchAllowedTime = Time.time + 0.5f;
+            state.NextSearchAllowedTime = Mathf.Max(state.NextSearchAllowedTime, Time.time + 0.5f);
         }
 
         internal static void FailTarget(RoamingState state, TargetFailureReason reason)
@@ -124,9 +248,15 @@ namespace SalcosRoamingBots.Navigation
             }
 
             bool hadTarget = state.HasTarget;
+            if (hadTarget)
+            {
+                RoamingCoverage.RecordFailure(state.Bot.Position, reason);
+            }
+
             RaidStatistics.RecordTargetFailure(reason, hadTarget);
             ReleaseReservation(state);
             state.ClearTarget(false);
+            state.ClearSuspendedTarget();
             state.ConsecutiveSearchFailures++;
             state.NextSearchAllowedTime = Time.time + SrbSettings.SearchRetryDelay.Value;
 
@@ -134,6 +264,11 @@ namespace SalcosRoamingBots.Navigation
             {
                 _logger?.LogDebug($"{Describe(state.Bot)} discarded its roaming target: {RaidStatistics.Describe(reason)}");
             }
+        }
+
+        internal static void RecordBotPosition(RoamingState state, Vector3 position)
+        {
+            RoamingCoverage.RecordVisit(state, position);
         }
 
         private static void EvaluateCandidate(TargetSearchJob job)
@@ -147,9 +282,24 @@ namespace SalcosRoamingBots.Navigation
 
             RaidStatistics.RecordCandidateEvaluation();
 
+            if (job.IsResume)
+            {
+                float sampleRadius = Mathf.Min(8f, SrbSettings.NavMeshSampleRadius.Value);
+                if (!NavMesh.SamplePosition(job.FixedDestination, out NavMeshHit resumeHit, sampleRadius, NavMesh.AllAreas))
+                {
+                    RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.NavMeshSample);
+                    return;
+                }
+
+                EvaluatePosition(job, resumeHit.position, true, 0f);
+                return;
+            }
+
             float failureScale = Mathf.Max(0.3f, 1f - state.ConsecutiveSearchFailures * 0.18f);
-            float minimumDistance = Mathf.Min(SrbSettings.MinimumTargetDistance.Value, SrbSettings.MaximumTargetDistance.Value) * failureScale;
-            float maximumDistance = Mathf.Max(SrbSettings.MinimumTargetDistance.Value, SrbSettings.MaximumTargetDistance.Value) * failureScale;
+            float adaptiveScale = SrbSettings.AdaptiveDistanceScaling.Value ? state.AdaptiveDistanceScale : 1f;
+            float totalScale = failureScale * adaptiveScale;
+            float minimumDistance = Mathf.Min(SrbSettings.MinimumTargetDistance.Value, SrbSettings.MaximumTargetDistance.Value) * totalScale;
+            float maximumDistance = Mathf.Max(SrbSettings.MinimumTargetDistance.Value, SrbSettings.MaximumTargetDistance.Value) * totalScale;
 
             float random = (float)state.Random.NextDouble();
             float distance = Mathf.Sqrt(Mathf.Lerp(minimumDistance * minimumDistance, maximumDistance * maximumDistance, random));
@@ -158,46 +308,94 @@ namespace SalcosRoamingBots.Navigation
 
             if (!NavMesh.SamplePosition(rawCandidate, out NavMeshHit hit, SrbSettings.NavMeshSampleRadius.Value, NavMesh.AllAreas))
             {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.NavMeshSample);
                 return;
             }
 
-            float directDistance = Vector3.Distance(bot.Position, hit.position);
-            if (directDistance < minimumDistance * 0.45f || IsTooCloseToReservation(hit.position, state))
+            EvaluatePosition(job, hit.position, false, minimumDistance);
+        }
+
+        private static void EvaluatePosition(TargetSearchJob job, Vector3 candidate, bool resume, float minimumDistance)
+        {
+            RoamingState state = job.State;
+            BotOwner bot = state.Bot;
+            float directDistance = Vector3.Distance(bot.Position, candidate);
+
+            if ((!resume && directDistance < minimumDistance * 0.45f)
+                || (resume && directDistance <= SrbSettings.TargetReachedDistance.Value * 1.5f))
             {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.TooShort);
+                return;
+            }
+
+            if (IsTooCloseToReservation(candidate, state))
+            {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.Reserved);
+                return;
+            }
+
+            if (RoamingCoverage.IsTemporarilyBlocked(candidate))
+            {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.BlockedSector);
                 return;
             }
 
             NavMeshPath path = job.WorkingPath;
             RaidStatistics.RecordPathCalculation();
-            if (!NavMesh.CalculatePath(bot.Position, hit.position, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete)
+            if (!NavMesh.CalculatePath(bot.Position, candidate, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete)
             {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.IncompletePath);
                 return;
             }
 
             Vector3[] corners = path.corners;
             if (corners == null || corners.Length < 2)
             {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.EmptyPath);
                 return;
             }
 
             float pathLength = CalculatePathLength(corners);
-            float requiredPathLength = SrbSettings.MinimumPathLength.Value * failureScale;
-            if (pathLength < requiredPathLength)
+            float failureScale = Mathf.Max(0.3f, 1f - state.ConsecutiveSearchFailures * 0.18f);
+            float adaptiveScale = SrbSettings.AdaptiveDistanceScaling.Value ? state.AdaptiveDistanceScale : 1f;
+            if (!resume && pathLength < SrbSettings.MinimumPathLength.Value * failureScale * adaptiveScale)
             {
+                RaidStatistics.RecordCandidateRejected(CandidateRejectionReason.TooShort);
                 return;
             }
 
             RaidStatistics.RecordCompleteCandidate();
+            job.CompleteCandidates++;
 
-            float novelty = CalculateNovelty(hit.position, state.RecentDestinations);
-            float score = pathLength + novelty * 0.35f;
+            float novelty = CalculateNovelty(candidate, state.RecentDestinations);
+            float coverageBonus = 0f;
+            if (SrbSettings.CoverageAwareRoaming.Value)
+            {
+                int heat = RoamingCoverage.GetHeat(candidate);
+                coverageBonus = SrbSettings.MaximumTargetDistance.Value * 0.45f / (1f + heat * 0.7f);
+            }
+
+            float detourRatio = pathLength / Mathf.Max(1f, directDistance);
+            float detourPenalty = Mathf.Max(0f, detourRatio - 2.2f) * Mathf.Min(pathLength, SrbSettings.MaximumTargetDistance.Value) * 0.35f;
+            float blockedPathPenalty = CalculateBlockedPathPenalty(corners);
+            float edgePenalty = 0f;
+            if (NavMesh.FindClosestEdge(candidate, out NavMeshHit edgeHit, NavMesh.AllAreas) && edgeHit.distance < 2.5f)
+            {
+                edgePenalty = (2.5f - edgeHit.distance) * SrbSettings.MaximumTargetDistance.Value * 0.4f;
+                RaidStatistics.RecordEdgeCandidate();
+            }
+
+            float score = resume
+                ? pathLength + 10000f
+                : pathLength + novelty * 0.35f + coverageBonus - detourPenalty - blockedPathPenalty - edgePenalty;
+
             if (score <= job.BestScore)
             {
                 return;
             }
 
             job.BestScore = score;
-            job.BestDestination = hit.position;
+            job.BestDestination = candidate;
             job.BestCorners = corners;
             job.BestPathLength = pathLength;
         }
@@ -214,29 +412,69 @@ namespace SalcosRoamingBots.Navigation
 
             if (job.BestCorners == null || job.BestCorners.Length < 2)
             {
-                RaidStatistics.RecordSearchFailed();
-                state.ConsecutiveSearchFailures++;
-                float delayMultiplier = Mathf.Min(4f, 1f + state.ConsecutiveSearchFailures * 0.5f);
-                state.NextSearchAllowedTime = Time.time + SrbSettings.SearchRetryDelay.Value * delayMultiplier;
+                if (job.IsResume)
+                {
+                    state.ClearSuspendedTarget();
+                    RaidStatistics.RecordResumeFailed();
+                    state.NextSearchAllowedTime = Time.time + Mathf.Max(0.5f, SrbSettings.SearchRetryDelay.Value);
+                }
+                else
+                {
+                    state.ConsecutiveSearchFailures++;
+                    RaidStatistics.RecordSearchFailed(state, state.ConsecutiveSearchFailures);
+                    AdjustAdaptiveDistance(state, false);
+                    float delayMultiplier = Mathf.Min(45f, Mathf.Pow(1.75f, Mathf.Min(8, state.ConsecutiveSearchFailures)));
+                    float retryDelay = Mathf.Min(90f, SrbSettings.SearchRetryDelay.Value * delayMultiplier);
+                    state.NextSearchAllowedTime = Time.time + retryDelay;
+                }
 
                 if (SrbSettings.DebugLogging.Value)
                 {
-                    _logger?.LogDebug($"No complete roaming path found for {Describe(state.Bot)}; retry {state.ConsecutiveSearchFailures}.");
+                    string searchType = job.IsResume ? "resume route" : "complete roaming path";
+                    _logger?.LogDebug($"No {searchType} found for {Describe(state.Bot)}; retry {state.ConsecutiveSearchFailures}.");
                 }
 
                 return;
             }
 
+            if (!job.IsResume)
+            {
+                AdjustAdaptiveDistance(state, true);
+                RaidStatistics.RecordSearchSucceeded(state);
+            }
+
             state.ConsecutiveSearchFailures = 0;
             state.NextSearchAllowedTime = 0f;
             state.AssignTarget(job.BestDestination, job.BestCorners, job.BestPathLength);
+            if (job.IsResume)
+            {
+                state.ClearSuspendedTarget();
+                RaidStatistics.RecordResumeSucceeded();
+            }
+
             RaidStatistics.RecordTargetAssigned(job.BestPathLength);
+            RoamingCoverage.RecordTargetAssigned(job.BestDestination);
             Reserve(state, job.BestDestination);
 
             if (SrbSettings.DebugLogging.Value)
             {
-                _logger?.LogDebug($"Assigned {Describe(state.Bot)} a roaming target {VectorText(job.BestDestination)} with {job.BestCorners.Length} corners.");
+                string resumed = job.IsResume ? "resumed" : "assigned";
+                _logger?.LogDebug($"{Describe(state.Bot)} {resumed} roaming target {VectorText(job.BestDestination)} with {job.BestCorners.Length} corners.");
             }
+        }
+
+        private static void AdjustAdaptiveDistance(RoamingState state, bool success)
+        {
+            if (!SrbSettings.AdaptiveDistanceScaling.Value)
+            {
+                state.AdaptiveDistanceScale = 1f;
+                return;
+            }
+
+            state.AdaptiveDistanceScale = success
+                ? Mathf.Min(1f, state.AdaptiveDistanceScale + 0.02f)
+                : Mathf.Max(0.35f, state.AdaptiveDistanceScale - 0.08f);
+            RaidStatistics.RecordAdaptiveScale(state.AdaptiveDistanceScale);
         }
 
         private static bool IsTooCloseToReservation(Vector3 candidate, RoamingState requestingState)
@@ -295,6 +533,31 @@ namespace SalcosRoamingBots.Navigation
             return length;
         }
 
+        private static float CalculateBlockedPathPenalty(Vector3[] corners)
+        {
+            if (corners == null || corners.Length < 2 || SrbSettings.FailedAreaCooldown.Value <= 0f)
+            {
+                return 0f;
+            }
+
+            for (int i = 1; i < corners.Length; i++)
+            {
+                Vector3 start = corners[i - 1];
+                Vector3 end = corners[i];
+                float distance = Vector3.Distance(start, end);
+                int samples = Mathf.Max(1, Mathf.CeilToInt(distance / (RoamingCoverage.SectorSize * 0.5f)));
+                for (int sample = 0; sample <= samples; sample++)
+                {
+                    if (RoamingCoverage.IsTemporarilyBlocked(Vector3.Lerp(start, end, sample / (float)samples)))
+                    {
+                        return SrbSettings.MaximumTargetDistance.Value * 0.5f;
+                    }
+                }
+            }
+
+            return 0f;
+        }
+
         private static void Reserve(RoamingState state, Vector3 position)
         {
             ReleaseReservation(state);
@@ -336,6 +599,14 @@ namespace SalcosRoamingBots.Navigation
             {
                 Reservations.Remove(StaleReservationIds[i]);
             }
+
+            for (int i = KnownStates.Count - 1; i >= 0; i--)
+            {
+                if (!KnownStates[i].TryGetTarget(out RoamingState state) || state == null || !IsBotAlive(state.Bot))
+                {
+                    KnownStates.RemoveAt(i);
+                }
+            }
         }
 
         private static bool IsBotAlive(BotOwner bot)
@@ -360,16 +631,21 @@ namespace SalcosRoamingBots.Navigation
 
         private sealed class TargetSearchJob
         {
-            internal TargetSearchJob(RoamingState state, int generation, int attempts)
+            internal TargetSearchJob(RoamingState state, int generation, int attempts, bool isResume, Vector3 fixedDestination)
             {
                 State = state;
                 Generation = generation;
                 AttemptsRemaining = attempts;
+                IsResume = isResume;
+                FixedDestination = fixedDestination;
             }
 
             internal RoamingState State { get; }
             internal int Generation { get; }
             internal int AttemptsRemaining { get; set; }
+            internal bool IsResume { get; }
+            internal Vector3 FixedDestination { get; }
+            internal int CompleteCandidates { get; set; }
             internal NavMeshPath WorkingPath { get; } = new NavMeshPath();
             internal float BestScore { get; set; } = float.MinValue;
             internal Vector3 BestDestination { get; set; }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using EFT;
 using SalcosRoamingBots.Configuration;
+using SalcosRoamingBots.Models;
 using UnityEngine;
 
 namespace SalcosRoamingBots.Utilities
@@ -29,27 +30,48 @@ namespace SalcosRoamingBots.Utilities
 
         internal static bool CanRoam(BotOwner bot)
         {
+            return Evaluate(bot).CanRoam;
+        }
+
+        internal static BotEligibilityResult Evaluate(BotOwner bot)
+        {
             if (bot == null || bot.IsDead || bot.BotState != EBotState.Active || bot.Mover == null || bot.Profile?.Info?.Settings == null)
             {
-                return false;
+                return Blocked(RoamingInterruptionReason.BotUnavailable);
             }
 
             if (SrbSettings.GroupLeadersOnly.Value && bot.BotsGroup != null && bot.BotsGroup.MembersCount > 1 && (bot.Boss == null || !bot.Boss.IamBoss))
             {
-                return false;
+                return Blocked(RoamingInterruptionReason.GroupRole);
             }
 
             if (!IsRoleEnabled(bot))
             {
-                return false;
+                return Blocked(RoamingInterruptionReason.BotRole);
             }
 
-            if (NeedsImmediateCare(bot) || IsInOrNearCombat(bot, SrbSettings.PostCombatCooldown.Value))
+            RoamingInterruptionReason safetyBlock = GetImmediateSafetyBlock(bot, SrbSettings.PostCombatCooldown.Value);
+            if (safetyBlock != RoamingInterruptionReason.None)
             {
-                return false;
+                return Blocked(safetyBlock);
             }
 
-            return true;
+            return BotEligibilityResult.Allowed;
+        }
+
+        internal static RoamingInterruptionReason GetImmediateSafetyBlock(BotOwner bot, float cooldown)
+        {
+            if (bot == null || bot.IsDead || bot.BotState != EBotState.Active)
+            {
+                return RoamingInterruptionReason.BotUnavailable;
+            }
+
+            if (NeedsImmediateCare(bot))
+            {
+                return RoamingInterruptionReason.Medical;
+            }
+
+            return GetCombatBlock(bot, cooldown);
         }
 
         private static bool IsRoleEnabled(BotOwner bot)
@@ -106,30 +128,45 @@ namespace SalcosRoamingBots.Utilities
             }
         }
 
-        private static bool IsInOrNearCombat(BotOwner bot, float cooldown)
+        private static RoamingInterruptionReason GetCombatBlock(BotOwner bot, float cooldown)
         {
             try
             {
                 if (bot.Memory == null)
                 {
-                    return false;
+                    return RoamingInterruptionReason.None;
                 }
 
-                if (bot.Memory.GoalEnemy != null || bot.Memory.DangerData?.HaveCloseDanger == true)
+                if (bot.Memory.GoalEnemy != null)
                 {
-                    return true;
+                    return RoamingInterruptionReason.Combat;
+                }
+
+                if (bot.Memory.DangerData?.HaveCloseDanger == true)
+                {
+                    return RoamingInterruptionReason.Danger;
                 }
 
                 float now = Time.time;
-                return IsRecent(now, bot.Memory.LastTimeHit, cooldown)
+                if (IsRecent(now, bot.Memory.LastTimeHit, cooldown)
                     || IsRecent(now, bot.Memory.EnemySetTime, cooldown)
                     || IsRecent(now, bot.Memory.LastEnemyTimeSeen, cooldown)
-                    || IsRecent(now, bot.Memory.UnderFireTime, cooldown);
+                    || IsRecent(now, bot.Memory.UnderFireTime, cooldown))
+                {
+                    return RoamingInterruptionReason.Combat;
+                }
+
+                return RoamingInterruptionReason.None;
             }
             catch
             {
-                return true;
+                return RoamingInterruptionReason.Danger;
             }
+        }
+
+        private static BotEligibilityResult Blocked(RoamingInterruptionReason reason)
+        {
+            return new BotEligibilityResult(false, reason);
         }
 
         private static bool IsRecent(float now, float eventTime, float cooldown)
@@ -138,4 +175,3 @@ namespace SalcosRoamingBots.Utilities
         }
     }
 }
-

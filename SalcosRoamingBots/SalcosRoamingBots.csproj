@@ -6,9 +6,9 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>SalcosRoamingBots</AssemblyName>
     <RootNamespace>SalcosRoamingBots</RootNamespace>
-    <AssemblyVersion>0.3.2.0</AssemblyVersion>
-    <FileVersion>0.3.2.0</FileVersion>
-    <Version>0.3.2</Version>
+    <AssemblyVersion>0.4.1.0</AssemblyVersion>
+    <FileVersion>0.4.1.0</FileVersion>
+    <Version>0.4.1</Version>
     <Authors>Salco</Authors>
     <Description>Resource-conscious, map-wide bot roaming for SPT 4.1.x.</Description>
     <Configurations>Debug;Release</Configurations>
@@ -51,6 +51,10 @@
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(SPTInstallPath)\EscapeFromTarkov_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

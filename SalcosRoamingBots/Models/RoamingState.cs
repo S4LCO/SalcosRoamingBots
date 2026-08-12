@@ -27,16 +27,29 @@ namespace SalcosRoamingBots.Models
         internal bool SearchQueued { get; set; }
         internal int SearchGeneration { get; set; }
         internal int ConsecutiveSearchFailures { get; set; }
+        internal float AdaptiveDistanceScale { get; set; } = 1f;
         internal float NextSearchAllowedTime { get; set; }
         internal float HoldUntil { get; set; }
         internal float DisabledUntil { get; set; }
+        internal float EmergencyYieldUntil { get; set; }
         internal int ReservationId { get; set; }
+        internal RoamingInterruptionReason PendingInterruptionReason { get; set; }
+        internal RoamingInterruptionReason LastInterruptionReason { get; set; }
+        internal float LastInterruptionTime { get; set; }
+
+        internal bool HasVisitedSector { get; set; }
+        internal int LastVisitedSectorX { get; set; }
+        internal int LastVisitedSectorZ { get; set; }
 
         internal bool HasTarget { get; private set; }
         internal Vector3 Destination { get; private set; }
         internal Vector3[] PathCorners { get; private set; } = Array.Empty<Vector3>();
         internal float AssignedPathLength { get; private set; }
         internal int PathVersion { get; private set; }
+
+        internal bool HasSuspendedTarget { get; private set; }
+        internal Vector3 SuspendedDestination { get; private set; }
+        internal float SuspendedTargetExpiresAt { get; private set; }
 
         internal Vector3 LastProgressPosition { get; set; }
         internal float LastProgressTime { get; set; }
@@ -67,6 +80,41 @@ namespace SalcosRoamingBots.Models
             PathCorners = Array.Empty<Vector3>();
             AssignedPathLength = 0f;
             PathVersion++;
+        }
+
+        internal void SuspendCurrentTarget(float lifetime)
+        {
+            if (!HasTarget || lifetime <= 0f)
+            {
+                return;
+            }
+
+            SuspendedDestination = Destination;
+            SuspendedTargetExpiresAt = Time.time + lifetime;
+            HasSuspendedTarget = true;
+        }
+
+        internal bool CanResumeTarget()
+        {
+            if (!HasSuspendedTarget)
+            {
+                return false;
+            }
+
+            if (Time.time <= SuspendedTargetExpiresAt)
+            {
+                return true;
+            }
+
+            ClearSuspendedTarget();
+            return false;
+        }
+
+        internal void ClearSuspendedTarget()
+        {
+            HasSuspendedTarget = false;
+            SuspendedDestination = Vector3.zero;
+            SuspendedTargetExpiresAt = 0f;
         }
 
         internal float NextFloat(float minimum, float maximum)
